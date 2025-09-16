@@ -33,16 +33,9 @@ const App = () => {
   const firestoreAuth = useRef(null);
   const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
   
-  // NOTE FOR LOCAL DEVELOPMENT: When you move this code to your local project,
-  // you will replace the line below with:
-  // const firebaseConfig = JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG || '{}');
-  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-
-  // API Configuration
-  // NOTE FOR LOCAL DEVELOPMENT: When you move this code to your local project,
-  // you will replace the line below with:
-  // const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-  const API_KEY = ""; // This is read from your .env.local file in your local project
+  // NOTE FOR DEPLOYMENT: The two lines below will be replaced to use environment variables.
+  const firebaseConfig = JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG || '{}');
+  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
   const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
   const TEXT_MODEL = 'gemini-2.5-flash-preview-05-20';
@@ -85,7 +78,7 @@ const App = () => {
     } catch (e) {
       console.error("Firebase init failed:", e);
     }
-  }, []);
+  }, [firebaseConfig]); // Add firebaseConfig as a dependency
 
   // Set up real-time listeners for interviews and STAR answers
   useEffect(() => {
@@ -96,13 +89,13 @@ const App = () => {
       const unsubscribeInterviews = onSnapshot(query(interviewCollectionRef), (snapshot) => {
         const interviews = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         // Sort in memory to avoid index issues
-        interviews.sort((a, b) => b.timestamp?.seconds - a.timestamp?.seconds);
+        interviews.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
         setSavedInterviews(interviews);
       }, (error) => console.error("Error fetching interviews:", error));
 
       const unsubscribeStars = onSnapshot(query(starCollectionRef), (snapshot) => {
         const starAnswers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        starAnswers.sort((a, b) => b.timestamp?.seconds - a.timestamp?.seconds);
+        starAnswers.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
         setSavedStarAnswers(starAnswers);
       }, (error) => console.error("Error fetching STAR answers:", error));
 
@@ -145,8 +138,7 @@ const App = () => {
       recognition.onerror = (event) => {
         console.error('Speech recognition error:', event.error);
         setIsRecording(false);
-        setLoadingMessage('Speech recognition failed. Please try again.');
-        setTimeout(() => setLoadingMessage(''), 3000);
+        showMessage('Speech recognition failed. Please try again.');
       };
 
       recognition.onend = () => {
@@ -158,14 +150,8 @@ const App = () => {
   }, []);
 
   const handleStartRecording = () => {
-    if (speechRecognition) {
+    if (speechRecognition && !isRecording) {
       speechRecognition.start();
-    }
-  };
-
-  const handleStopRecording = () => {
-    if (speechRecognition) {
-      speechRecognition.stop();
     }
   };
   
@@ -177,6 +163,11 @@ const App = () => {
 
   // Generic Gemini API call with exponential backoff
   const callGeminiAPI = async (model, contents, config = {}, retries = 3, delay = 1000) => {
+    if (!API_KEY) {
+      console.error("API Key is missing. Please set it in your environment variables.");
+      showMessage("API Key is missing. Deployment may not be configured correctly.");
+      return;
+    }
     try {
       const response = await fetch(`${API_BASE_URL}/${model}:generateContent?key=${API_KEY}`, {
         method: 'POST',
@@ -223,13 +214,8 @@ const App = () => {
         model: TTS_MODEL
       };
       
-      const response = await fetch(`${API_BASE_URL}/${TTS_MODEL}:generateContent?key=${API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const result = await response.json();
+      const result = await callGeminiAPI(TTS_MODEL, payload.contents, payload.generationConfig);
+      
       const part = result?.candidates?.[0]?.content?.parts?.[0];
       const audioData = part?.inlineData?.data;
       const mimeType = part?.inlineData?.mimeType;
@@ -289,7 +275,11 @@ const App = () => {
           return new Blob([view], { type: 'audio/wav' });
         };
         
-        const sampleRate = parseInt(mimeType.match(/rate=(\d+)/)[1], 10);
+        const sampleRateMatch = mimeType.match(/rate=(\d+)/);
+        if (!sampleRateMatch) {
+            throw new Error("Sample rate not found in mimeType");
+        }
+        const sampleRate = parseInt(sampleRateMatch[1], 10);
         const pcmData = base64ToArrayBuffer(audioData);
         const wavBlob = pcmToWav(pcmData, sampleRate);
         const audioUrl = URL.createObjectURL(wavBlob);
@@ -325,7 +315,7 @@ const App = () => {
 
     try {
       const response = await callGeminiAPI(TEXT_MODEL, [{ role: 'user', parts: [{ text: prompt }] }]);
-      const tipText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+      const tipText = response?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (tipText) {
         setRealTimeTip(tipText);
         setTimeout(() => setRealTimeTip(null), 7000); // Clear tip after 7 seconds
@@ -352,7 +342,7 @@ const App = () => {
 
     try {
       const response = await callGeminiAPI(TEXT_MODEL, initialContent);
-      const firstQuestion = response.candidates?.[0]?.content?.parts?.[0]?.text;
+      const firstQuestion = response?.candidates?.[0]?.content?.parts?.[0]?.text;
       
       if (firstQuestion) {
         setChatHistory([{ role: 'interviewer', text: firstQuestion }]);
@@ -393,7 +383,7 @@ const App = () => {
     
     try {
       const response = await callGeminiAPI(TEXT_MODEL, [{ role: 'user', parts: [{ text: interviewPrompt }] }]);
-      const nextQuestion = response.candidates?.[0]?.content?.parts?.[0]?.text;
+      const nextQuestion = response?.candidates?.[0]?.content?.parts?.[0]?.text;
 
       if (nextQuestion) {
         setChatHistory(prev => [...prev, { role: 'interviewer', text: nextQuestion }]);
@@ -433,7 +423,7 @@ const App = () => {
     
     try {
       const response = await callGeminiAPI(TEXT_MODEL, [{ role: 'user', parts: [{ text: feedbackPrompt }] }], { responseMimeType: "application/json" });
-      const feedbackJson = response.candidates?.[0]?.content?.parts?.[0]?.text;
+      const feedbackJson = response?.candidates?.[0]?.content?.parts?.[0]?.text;
       const parsedFeedback = JSON.parse(feedbackJson);
 
       if (parsedFeedback) {
@@ -490,7 +480,7 @@ const App = () => {
 
     try {
       const response = await callGeminiAPI(TEXT_MODEL, [{ role: 'user', parts: [{ text: starPrompt }] }]);
-      const nextPrompt = response.candidates?.[0]?.content?.parts?.[0]?.text;
+      const nextPrompt = response?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (nextPrompt) {
         showMessage(nextPrompt, 6000);
       }
@@ -581,7 +571,7 @@ const App = () => {
 
     try {
       const response = await callGeminiAPI(TEXT_MODEL, [{ role: 'user', parts: [{ text: questionsPrompt }] }]);
-      const questionsText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+      const questionsText = response?.candidates?.[0]?.content?.parts?.[0]?.text;
       
       if (questionsText) {
         setFeedback(questionsText);
@@ -602,7 +592,7 @@ const App = () => {
     switch (currentPage) {
       case 'home':
         return (
-          <div className="flex flex-col items-center justify-center p-6 space-y-6">
+          <div className="flex flex-col items-center justify-center p-6 space-y-6 flex-grow">
             <div className="flex flex-col items-center space-y-4 mb-4">
                 <img src="https://www.fbi.gov/image-repository/fbi-seal.jpg" alt="FBI Badge" className="w-20 h-auto rounded-lg" />
                 <h1 className="text-3xl font-bold text-center text-gray-50">FBI Unit Chief for Victim Services Interview Prep</h1>
@@ -644,7 +634,7 @@ const App = () => {
               </select>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-4 w-full justify-center max-w-md">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-2xl">
               <button
                 onClick={startMockInterview}
                 className="w-full px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-200"
@@ -670,48 +660,6 @@ const App = () => {
                 Progress Dashboard
               </button>
             </div>
-            
-            {savedInterviews.length > 0 && (
-              <div className="w-full max-w-md p-4 bg-gray-700 rounded-lg shadow-inner">
-                <h3 className="text-xl font-semibold text-gray-50 mb-4">Saved Interviews</h3>
-                <ul className="space-y-2">
-                  {savedInterviews.map((interview) => (
-                    <li key={interview.id} className="flex justify-between items-center bg-gray-800 p-3 rounded-md">
-                      <span className="text-gray-200 text-sm">
-                        {new Date(interview.timestamp?.seconds * 1000).toLocaleString()}
-                      </span>
-                      <button
-                        onClick={() => viewSavedInterview(interview)}
-                        className="px-3 py-1 text-xs bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
-                      >
-                        View Feedback
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            
-            {savedStarAnswers.length > 0 && (
-              <div className="w-full max-w-md p-4 bg-gray-700 rounded-lg shadow-inner">
-                <h3 className="text-xl font-semibold text-gray-50 mb-4">Saved STAR Answers</h3>
-                <ul className="space-y-2">
-                  {savedStarAnswers.map((starAnswer) => (
-                    <li key={starAnswer.id} className="flex justify-between items-center bg-gray-800 p-3 rounded-md">
-                      <span className="text-gray-200 text-sm italic">
-                        "{starAnswer.question.substring(0, 30)}..."
-                      </span>
-                      <button
-                        onClick={() => viewSavedStarAnswer(starAnswer)}
-                        className="px-3 py-1 text-xs bg-purple-500 text-white rounded-md hover:bg-purple-600 transition-colors"
-                      >
-                        View Answer
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
           </div>
         );
 
@@ -734,7 +682,7 @@ const App = () => {
                 </div>
               )}
               {realTimeTip && (
-                <div className="fixed bottom-24 left-1/2 -translate-x-1/2 w-3/4 max-w-md p-3 text-center bg-yellow-500 text-white rounded-lg shadow-lg z-50 animate-bounce-in">
+                <div className="fixed bottom-24 left-1/2 -translate-x-1/2 w-3/4 max-w-md p-3 text-center bg-yellow-500 text-black rounded-lg shadow-lg z-50 animate-bounce-in">
                   {realTimeTip}
                 </div>
               )}
@@ -753,7 +701,7 @@ const App = () => {
               <button
                 onClick={handleStartRecording}
                 disabled={isLoading || isRecording || !speechRecognition || isSpeaking}
-                className="p-3 bg-red-600 text-white rounded-lg shadow-md hover:bg-red-700 transition-colors duration-200 disabled:bg-gray-600"
+                className={`p-3 rounded-lg shadow-md transition-colors duration-200 ${isRecording ? 'bg-yellow-500' : 'bg-red-600'} text-white hover:bg-red-700 disabled:bg-gray-600`}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
                   <path d="M8.25 4.5a3.75 3.75 0 1 1 7.5 0v8.25a3.75 3.75 0 1 1-7.5 0V4.5z" />
@@ -779,7 +727,7 @@ const App = () => {
               </button>
               <button
                 onClick={getInterviewFeedback}
-                disabled={chatHistory.length === 0}
+                disabled={chatHistory.length < 2}
                 className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors duration-200 disabled:bg-gray-600"
               >
                 Get Feedback
@@ -798,7 +746,7 @@ const App = () => {
                   <div className="loader ease-linear rounded-full border-4 border-t-4 border-gray-200 h-12 w-12 mb-4"></div>
                   <p className="text-lg">{loadingMessage}</p>
                 </div>
-              ) : feedback ? (
+              ) : feedback && typeof feedback === 'object' ? (
                 <div className="space-y-6">
                   <div className="flex flex-col items-center">
                     <h3 className="text-lg font-semibold text-gray-100">Overall Score</h3>
@@ -823,7 +771,7 @@ const App = () => {
                     </ul>
                   </div>
                   
-                  <div>
+                  {feedback.ideal_answers && <div>
                     <h3 className="text-lg font-semibold text-gray-100">Ideal Answers</h3>
                     <div className="space-y-4 mt-2">
                       {Object.keys(feedback.ideal_answers).map((question, i) => (
@@ -833,7 +781,7 @@ const App = () => {
                         </div>
                       ))}
                     </div>
-                  </div>
+                  </div>}
                 </div>
               ) : (
                 <p className="text-center">No feedback available. Please complete a mock interview first.</p>
@@ -909,7 +857,7 @@ const App = () => {
                   <div className="loader ease-linear rounded-full border-4 border-t-4 border-gray-200 h-12 w-12 mb-4"></div>
                   <p className="text-lg">{loadingMessage}</p>
                 </div>
-              ) : feedback ? (
+              ) : feedback && typeof feedback === 'string' ? (
                 <div dangerouslySetInnerHTML={{ __html: feedback.replace(/\n/g, '<br />') }} />
               ) : (
                 <p className="text-center">Questions will appear here. The job description context from the home page will be used if provided.</p>
@@ -942,11 +890,11 @@ const App = () => {
                       {savedInterviews.slice().reverse().map((interview, index) => (
                         <div key={index} className="flex flex-col items-center group relative">
                           <div
-                            className="w-6 bg-blue-500 rounded-t-full transition-all duration-300 hover:bg-blue-400"
+                            className="w-6 bg-blue-500 rounded-t-lg transition-all duration-300 hover:bg-blue-400"
                             style={{ height: `${interview.feedback?.score * 10}%` }}
                           ></div>
                           <span className="text-xs text-gray-300 mt-2">{interview.feedback?.score}</span>
-                          <div className="absolute top-0 transform -translate-y-full -translate-x-1/2 left-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-gray-900 text-white text-xs rounded py-1 px-2 pointer-events-none">
+                          <div className="absolute -top-2 transform -translate-y-full -translate-x-1/2 left-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-gray-900 text-white text-xs rounded py-1 px-2 pointer-events-none">
                             {new Date(interview.timestamp?.seconds * 1000).toLocaleDateString()}
                           </div>
                         </div>
@@ -1055,14 +1003,12 @@ const App = () => {
         {loadingMessage && (
           <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
             <div className="bg-gray-800 p-6 rounded-lg shadow-lg text-white text-center">
-              {loadingMessage === 'Analyzing your performance...' || loadingMessage === 'Generating questions...' || loadingMessage === 'Initializing mock interview...' ? (
+              {isLoading && (
                 <div className="flex flex-col items-center">
                   <div className="loader ease-linear rounded-full border-4 border-t-4 border-blue-500 h-12 w-12 mb-4"></div>
-                  <p>{loadingMessage}</p>
                 </div>
-              ) : (
-                <p>{loadingMessage}</p>
               )}
+              <p>{loadingMessage}</p>
             </div>
           </div>
         )}
@@ -1072,5 +1018,4 @@ const App = () => {
 };
 
 export default App;
-
 
